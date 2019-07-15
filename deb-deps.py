@@ -194,7 +194,8 @@ def parse_package_gz(filename, repo_url):
                 if not key or not val:
                     continue
 
-                if key == "PreDepends" or key == "Depends":
+                if key == "Pre-Depends" or key == "Depends":
+                    # print(val)
                     # Concat PreDepends and Depends
                     if len(val) > 0:
                         if "Depends" not in package_desc.keys():
@@ -205,7 +206,7 @@ def parse_package_gz(filename, repo_url):
 
                         val = re.sub(", ", ",", val).split(",")
 
-                        package_desc["Depends"] = list()
+                        # package_desc["Depends"] = list()
 
                         for sub in val:
                             if len(sub.split(" ")) == 1:
@@ -218,6 +219,10 @@ def parse_package_gz(filename, repo_url):
 
                 else:
                     package_desc[key] = val
+
+            # if package_desc["Package"] == "bash":
+            #     print(package_desc)
+            #     raise StopIteration("Bash")
 
             if package_desc:
                 package_desc["repo_url"] = repo_url
@@ -331,6 +336,12 @@ def sorted_tree(tree):
     :rtype: collections.OrderedDict
 
     """
+    # ls = []
+    # for k, v in tree.items():
+    #     ls.append((k, sorted(v, key=attrgetter('key'))))
+
+    # print(sorted(ls, key=lambda kv: kv[0].key))
+
     return OrderedDict(sorted([(k, sorted(v, key=attrgetter('key')))
                                for k, v in tree.items()],
                               key=lambda kv: kv[0].key))
@@ -354,6 +365,17 @@ def render_tree(tree, list_all=True, show_only=None, frozen=False, exclude=None)
 
     """
     tree = sorted_tree(tree)
+    di = {}
+    for i,j in tree.items():
+        deps = ", ".join([x.key for x in j])
+        d = {
+            i.key: deps
+        }
+        di.update(d)
+    print(di)
+
+    # print(tree)
+    return
     branch_keys = set(r.key for r in flatten(tree.values()))
     nodes = tree.keys()
     use_bullets = not frozen
@@ -414,8 +436,44 @@ def main():
     #print(bindex)
     #return
     tree = construct_tree(bindex)
+
     cyclic = cyclic_deps(tree)
-    print(render_tree(tree))
+    cyclic_lookup = {}
+
+    for i in cyclic:
+        d = {
+            i[0].key: i[1].key
+        }
+        cyclic_lookup.update(d)
+    # for i,j in cyclic.items():
+    #     deps = ", ".join([x.key for x in j])
+    #     d = {
+    #         i.key: deps
+    #     }
+        
+
+    tree = sorted_tree(tree)
+    tree_lookup = {}
+
+    for i,j in tree.items():
+        deps = [x.key for x in j]
+        d = {
+            i.key: deps
+        }
+        tree_lookup.update(d)
+
+    with open(f"tree.json", 'w') as f:
+        json.dump(tree_lookup, f, indent=4)
+
+    with open(f"cyclic.json", 'w') as f:
+        json.dump(cyclic_lookup, f, indent=4)
+
+    deps = []
+
+    build_deps("curl", tree_lookup, cyclic_lookup, deps, root=True)
+
+    print(deps)
+    #print(json.dumps(di, indent=4))
     #conflict = conflicting_deps(tree)
     #print(conflict)
     #print(cyclic)
@@ -424,6 +482,35 @@ def main():
 
     #print(json.dumps(index[1], indent=4))
 
+def build_deps(package, tree, cyclic, final_deps, root=False):
+    if package in tree.keys():
+        deps = tree[package]
+
+        print(deps)
+
+        for dep in deps:
+            if root:
+                print(f"Root dep {dep}")
+            else:
+                print(dep)
+            if dep in cyclic.keys():
+                print("Cyclic")
+
+                if dep in final_deps:
+                    print("Cyclic parsed")
+                else:
+                    print(f"Appending package {cyclic[dep]}")
+                    final_deps.append(dep)
+                    build_deps(dep, tree, cyclic, final_deps)
+            else:
+                build_deps(dep, tree, cyclic, final_deps)
+
+        if not package in final_deps:
+            final_deps.append(package)
+    else:
+        raise ValueError(f"Package not found {package}")
+
+    return
 
 if __name__ == '__main__':
     sys.exit(main())
