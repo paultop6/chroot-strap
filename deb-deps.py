@@ -9,6 +9,9 @@ import re
 from operator import attrgetter
 from collections import defaultdict
 from itertools import chain
+import subprocess
+import getpass
+import apt_pkg
 
 try:
     from collections import OrderedDict
@@ -16,6 +19,49 @@ except ImportError:
     from ordereddict import OrderedDict
 
 flatten = chain.from_iterable
+
+def callProcess(cmd, live_output=False, printcmd=False, curdir="/", valid_returncodes=[0,], root=False, inc_returncode=False):
+	try:
+		output = ""
+
+		if printcmd:
+			print(cmd)
+
+		if root and getpass.getuser() != "root":
+			cmd = "sudo " + cmd
+
+		with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True, cwd=curdir) as process:
+			if live_output:
+				for line in iter(process.stdout.readline, ''):
+					if len(line) > 0:
+						print(line.decode("ascii", "ignore").rstrip("\n"))
+						output = output + line.decode("ascii", "ignore")
+					else:
+						break
+
+				process.communicate()
+			else:
+				data   = process.communicate()
+				output = data[0].decode("utf-8")
+
+			if not process.returncode in valid_returncodes:
+				raise subprocess.CalledProcessError(process.returncode, cmd=cmd, output=output)
+
+			if inc_returncode:
+				return (process.returncode, output)
+			else:
+				return output
+
+	except subprocess.CalledProcessError as e:
+		print("Failed to call %s" % (e.cmd))
+		print("Reason %s" % (e.output))
+
+		raise
+
+	except Exception as e:
+		print("Failed PySNE.common.callProcess: %s" % str(e))
+
+		raise
 
 class Package(object):
     """Abstract class for wrappers around objects that pip returns.
@@ -210,12 +256,20 @@ def parse_package_gz(filename, repo_url):
 
                         for sub in val:
                             if len(sub.split(" ")) == 1:
-                                sub_pck = sub
-                                version_str = ""
+                                sub_pck_dict = {
+                                    "name": sub, 
+                                    "version": "",
+                                    "version_test": ""
+                                }
                             else:
                                 sub_pck, version_str = re.sub('[()]', '', sub).split(" ", 1)
+                                sub_pck_dict = {
+                                    "name": sub_pck,
+                                    "version": version_str.split(" ")[1] if len(version_str.split(" ")) > 1 else version_str,
+                                    "version_test": version_str.split(" ")[0] if len(version_str.split(" ")) > 1 else "=="
+                                }
 
-                            package_desc["Depends"].append({"key": sub_pck, "value": version_str})
+                            package_desc["Depends"].append({"key": sub_pck_dict["name"], "value": sub_pck_dict})
 
                 else:
                     package_desc[key] = val
@@ -257,7 +311,23 @@ def get_repo_contents(user_config):
     return (index, package_list)
 
 def build_index(pkgs):
-    return dict((p["Package"], DistPackage(p)) for p in pkgs)
+    index = {}
+
+    for p in pkgs:
+        if not p["Package"] in index.keys():
+            index[p["Package"]] = []
+
+        index[p["Package"]].append(p)
+
+        provides = re.sub(", ", ",", p["Provides"]).split(",") if "Provides" in p.keys() else []
+
+        for pro in provides:
+            if not pro in index.keys():
+                index[pro] = []
+                index[pro].append(p)
+
+    return index
+    # return dict((f"{p['Package']}-{p['Version']}", DistPackage(p)) for p in pkgs)
 
 
 def construct_tree(index):
@@ -420,6 +490,8 @@ def main():
     debian_packages = dict()
     debian_packages_basic = dict()
 
+    apt_pkg.init_system()
+
     with open(vargs["repos"], "r") as f:
        config = json.load(f)
 
@@ -433,9 +505,20 @@ def main():
        packages = json.load(f)
 
     bindex = build_index(index[1])
+
+    deps = []
+
+    build_deps({"name": "curl", "version": "", "version_test": ""}, deps, bindex)
+
+    print([x["Package"] for x in deps])
+
+    return
+
     #print(bindex)
     #return
     tree = construct_tree(bindex)
+
+    print(tree)
 
     cyclic = cyclic_deps(tree)
     cyclic_lookup = {}
@@ -482,7 +565,91 @@ def main():
 
     #print(json.dumps(index[1], indent=4))
 
-def build_deps(package, tree, cyclic, final_deps, root=False):
+
+
+
+def cyclic(package, deps, index, dep_stack=[]):
+    print(package)
+
+    find = next((x for x in index if x["key"] == package), None)
+
+    if find:
+        if find["key"] in dep_stack:
+            print("Cyclic")
+        else:
+            dep_stack.append(find["key"])
+            deps.append(find["key"])
+            for v in find["value"]:
+                cyclic(v, deps, dep_stack)
+
+    if len(dep_stack) > 0:
+        dep_stack.pop()
+
+    return
+
+class AptVerChk():
+    lookup = {
+        "<": lambda x: x < 0,
+        "<<": lambda x: x < 0,
+        "<=": lambda x: x <= 0,
+        "=": lambda x: x == 0,
+        ">=": lambda x: x >= 0,
+        ">>": lambda x: x > 0,
+        ">": lambda x: x > 0
+    }
+
+    @classmethod
+    def compare(cls, a, sym, b):
+        comp = apt_pkg.version_compare(a, b)
+
+        return cls.lookup[sym](comp) if sym in cls.lookup.keys() else False
+
+def build_deps(package, deps, index, dep_stack=[]):
+    # print(f"Root Dep {package['name']}: {dep_stack}")
+    # print(dep_stack)
+
+    if package["name"] in index.keys():
+        found = False
+        for pkg_inst in index[package["name"]]:
+            #print(pkg_inst["Package"])
+            
+            if len(package['version']) > 0:
+                if not AptVerChk.compare(pkg_inst['Version'], package['version_test'], package['version']):
+                    raise ValueError(f"Cant find version match for {package['name']}")
+                else:
+                    found = True
+
+            if pkg_inst["Package"] in dep_stack:
+                # print("Cyclic")
+                if found:
+                    break
+                continue
+            else:
+                dep_stack.append(pkg_inst["Package"])
+                if pkg_inst not in deps:
+                    deps.append(pkg_inst)
+                else:
+                    if found:
+                        break
+                    continue
+
+                if "Depends" in pkg_inst.keys():
+                    # print(pkg_inst["Depends"])
+                    for v in pkg_inst["Depends"]:
+                        build_deps(v["value"], deps, index, dep_stack)
+
+            if found:
+                break
+    else:
+        raise ValueError(f"Package not found {package['name']}")
+
+    if len(dep_stack) > 0:
+        dep_stack.pop()
+
+    return
+
+
+def build_deps_old(package, tree, cyclic, final_deps, root=False):
     if package in tree.keys():
         deps = tree[package]
 
