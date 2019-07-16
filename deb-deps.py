@@ -13,12 +13,6 @@ import subprocess
 import getpass
 import apt_pkg
 
-try:
-    from collections import OrderedDict
-except ImportError:
-    from ordereddict import OrderedDict
-
-flatten = chain.from_iterable
 
 def callProcess(cmd, live_output=False, printcmd=False, curdir="/", valid_returncodes=[0,], root=False, inc_returncode=False):
 	try:
@@ -63,162 +57,6 @@ def callProcess(cmd, live_output=False, printcmd=False, curdir="/", valid_return
 
 		raise
 
-class Package(object):
-    """Abstract class for wrappers around objects that pip returns.
-
-    This class needs to be subclassed with implementations for
-    `render_as_root` and `render_as_branch` methods.
-
-    """
-
-    def __init__(self, obj):
-        self._obj = obj
-        #print(obj)
-        if "Package" not in obj:
-            raise StopIteration(obj)
-        self.package = obj["Package"]
-        self.key = obj["Package"]
-
-    def render_as_root(self, frozen):
-        return NotImplementedError
-
-    def render_as_branch(self, frozen):
-        return NotImplementedError
-
-    def render(self, parent=None, frozen=False):
-        if not parent:
-            return self.render_as_root(frozen)
-        else:
-            return self.render_as_branch(frozen)
-
-    # @staticmethod
-    # def frozen_repr(obj):
-    #     fr = frozen_req_from_dist(obj)
-    #     return str(fr).strip()
-
-    def __getattr__(self, key):
-        # if key in self._obj:
-        #     print(self._obj[key])
-        #     print(self._obj.values())
-        return self._obj[key] if key in self._obj else []
-
-    def __repr__(self):
-        return '<{0}("{1}")>'.format(self.__class__.__name__, self.key)
-
-
-class DistPackage(Package):
-    """Wrapper class for pkg_resources.Distribution instances
-
-      :param obj: pkg_resources.Distribution to wrap over
-      :param req: optional ReqPackage object to associate this
-                  DistPackage with. This is useful for displaying the
-                  tree in reverse
-    """
-
-    def __init__(self, obj, req=None):
-        super(DistPackage, self).__init__(obj)
-        self.version_spec = None
-        self.req = req
-
-    def render_as_root(self, frozen):
-        if not frozen:
-            return '{0}=={1}'.format(self.project_name, self.version)
-        else:
-            return self.__class__.frozen_repr(self._obj)
-
-    def render_as_branch(self, frozen):
-        assert self.req is not None
-        if not frozen:
-            parent_ver_spec = self.req.version_spec
-            parent_str = self.req.project_name
-            if parent_ver_spec:
-                parent_str += parent_ver_spec
-            return (
-                '{0}=={1} [requires: {2}]'
-            ).format(self.project_name, self.version, parent_str)
-        else:
-            return self.render_as_root(frozen)
-
-    def as_requirement(self):
-        """Return a ReqPackage representation of this DistPackage"""
-        return ReqPackage(self._obj.as_requirement(), dist=self)
-
-    def as_required_by(self, req):
-        """Return a DistPackage instance associated to a requirement
-
-        This association is necessary for displaying the tree in
-        reverse.
-
-        :param ReqPackage req: the requirement to associate with
-        :returns: DistPackage instance
-
-        """
-        return self.__class__(self._obj, req)
-
-    def as_dict(self):
-        return {'key': self.key,
-                'package_name': self.project_name,
-                'installed_version': self.version}
-
-
-class ReqPackage(Package):
-    """Wrapper class for Requirements instance
-
-      :param obj: The `Requirements` instance to wrap over
-      :param dist: optional `pkg_resources.Distribution` instance for
-                   this requirement
-    """
-
-    UNKNOWN_VERSION = '?'
-
-    def __init__(self, obj, dist=None):
-        super(ReqPackage, self).__init__(obj)
-        self.dist = dist
-
-    @property
-    def version_spec(self):
-        specs = sorted(self._obj.specs, reverse=True)  # `reverse` makes '>' prior to '<'
-        return ','.join([''.join(sp) for sp in specs]) if specs else None
-
-    @property
-    def installed_version(self):
-        if not self.dist:
-            return guess_version(self.key, self.UNKNOWN_VERSION)
-        return self.dist.version
-
-    def is_conflicting(self):
-        """If installed version conflicts with required version"""
-        # unknown installed version is also considered conflicting
-        if self.installed_version == self.UNKNOWN_VERSION:
-            return True
-        ver_spec = (self.version_spec if self.version_spec else '')
-        req_version_str = '{0}{1}'.format(self.project_name, ver_spec)
-        req_obj = pkg_resources.Requirement.parse(req_version_str)
-        return self.installed_version not in req_obj
-
-    def render_as_root(self, frozen):
-        if not frozen:
-            return '{0}=={1}'.format(self.project_name, self.installed_version)
-        elif self.dist:
-            return self.__class__.frozen_repr(self.dist._obj)
-        else:
-            return self.project_name
-
-    def render_as_branch(self, frozen):
-        if not frozen:
-            req_ver = self.version_spec if self.version_spec else 'Any'
-            return (
-                '{0} [required: {1}, installed: {2}]'
-                ).format(self.project_name, req_ver, self.installed_version)
-        else:
-            return self.render_as_root(frozen)
-
-    def as_dict(self):
-        return {'key': self.key,
-                'package_name': self.project_name,
-                'installed_version': self.installed_version,
-                'required_version': self.version_spec}
-
 
 def parse_package_gz(filename, repo_url):
     package_list = []
@@ -256,6 +94,14 @@ def parse_package_gz(filename, repo_url):
 
                         for sub in val:
                             if len(sub.split(" ")) == 1:
+                                sub = sub.split(":")
+                                if len(sub) == 1:
+                                    sub = sub[0]
+                                else:
+                                    if sub[1] == "any":
+                                        sub = sub[0]
+                                    else:
+                                        raise Exception(f"Not able to handle this yet {sub}") # Colon splitting is architecture
                                 sub_pck_dict = {
                                     "name": sub, 
                                     "version": "",
@@ -263,6 +109,16 @@ def parse_package_gz(filename, repo_url):
                                 }
                             else:
                                 sub_pck, version_str = re.sub('[()]', '', sub).split(" ", 1)
+
+                                sub_pck = sub_pck.split(":")
+                                if len(sub_pck) == 1:
+                                    sub_pck = sub_pck[0]
+                                else:
+                                    if sub_pck[1] == "any":
+                                        sub_pck = sub_pck[0]
+                                    else:
+                                        raise Exception(f"Not able to handle this yet {sub}")
+
                                 sub_pck_dict = {
                                     "name": sub_pck,
                                     "version": version_str.split(" ")[1] if len(version_str.split(" ")) > 1 else version_str,
@@ -273,10 +129,6 @@ def parse_package_gz(filename, repo_url):
 
                 else:
                     package_desc[key] = val
-
-            # if package_desc["Package"] == "bash":
-            #     print(package_desc)
-            #     raise StopIteration("Bash")
 
             if package_desc:
                 package_desc["repo_url"] = repo_url
@@ -310,6 +162,7 @@ def get_repo_contents(user_config):
 
     return (index, package_list)
 
+
 def build_index(pkgs):
     index = {}
 
@@ -327,158 +180,7 @@ def build_index(pkgs):
                 index[pro].append(p)
 
     return index
-    # return dict((f"{p['Package']}-{p['Version']}", DistPackage(p)) for p in pkgs)
 
-
-def construct_tree(index):
-    """Construct tree representation of the pkgs from the index.
-
-    The keys of the dict representing the tree will be objects of type
-    DistPackage and the values will be list of ReqPackage objects.
-
-    :param dict index: dist index ie. index of pkgs by their keys
-    :returns: tree of pkgs and their dependencies
-    :rtype: dict
-
-    """
-    tree = dict()
-    
-    for p in index.values():
-        deps = list()
-        for r in p.Depends:
-            find = index.get(r["key"]) if r["key"] in index else None
-
-            if find:
-                deps.append(ReqPackage(index.get(r["key"])._obj))
-        
-        tree.update({p: deps})
-
-    return tree
-
-def conflicting_deps(tree):
-    """Returns dependencies which are not present or conflict with the
-    requirements of other packages.
-
-    e.g. will warn if pkg1 requires pkg2==2.0 and pkg2==1.0 is installed
-
-    :param tree: the requirements tree (dict)
-    :returns: dict of DistPackage -> list of unsatisfied/unknown ReqPackage
-    :rtype: dict
-
-    """
-    conflicting = defaultdict(list)
-    for p, rs in tree.items():
-        for req in rs:
-            if req.is_conflicting():
-                conflicting[p].append(req)
-    return conflicting
-
-
-def cyclic_deps(tree):
-    """Return cyclic dependencies as list of tuples
-
-    :param list pkgs: pkg_resources.Distribution instances
-    :param dict pkg_index: mapping of pkgs with their respective keys
-    :returns: list of tuples representing cyclic dependencies
-    :rtype: generator
-
-    """
-    key_tree = dict((k.key, v) for k, v in tree.items())
-    get_children = lambda n: key_tree.get(n.key, [])
-    cyclic = []
-    for p, rs in tree.items():
-        for req in rs:
-            if p.key in map(attrgetter('key'), get_children(req)):
-                print((p, req, p))
-                cyclic.append((p, req, p))
-    return cyclic
-
-
-def sorted_tree(tree):
-    """Sorts the dict representation of the tree
-
-    The root packages as well as the intermediate packages are sorted
-    in the alphabetical order of the package names.
-
-    :param dict tree: the pkg dependency tree obtained by calling
-                     `construct_tree` function
-    :returns: sorted tree
-    :rtype: collections.OrderedDict
-
-    """
-    # ls = []
-    # for k, v in tree.items():
-    #     ls.append((k, sorted(v, key=attrgetter('key'))))
-
-    # print(sorted(ls, key=lambda kv: kv[0].key))
-
-    return OrderedDict(sorted([(k, sorted(v, key=attrgetter('key')))
-                               for k, v in tree.items()],
-                              key=lambda kv: kv[0].key))
-
-
-def render_tree(tree, list_all=True, show_only=None, frozen=False, exclude=None):
-    """Convert tree to string representation
-
-    :param dict tree: the package tree
-    :param bool list_all: whether to list all the pgks at the root
-                          level or only those that are the
-                          sub-dependencies
-    :param set show_only: set of select packages to be shown in the
-                          output. This is optional arg, default: None.
-    :param bool frozen: whether or not show the names of the pkgs in
-                        the output that's favourable to pip --freeze
-    :param set exclude: set of select packages to be excluded from the
-                          output. This is optional arg, default: None.
-    :returns: string representation of the tree
-    :rtype: str
-
-    """
-    tree = sorted_tree(tree)
-    di = {}
-    for i,j in tree.items():
-        deps = ", ".join([x.key for x in j])
-        d = {
-            i.key: deps
-        }
-        di.update(d)
-    print(di)
-
-    # print(tree)
-    return
-    branch_keys = set(r.key for r in flatten(tree.values()))
-    nodes = tree.keys()
-    use_bullets = not frozen
-
-    key_tree = dict((k.key, v) for k, v in tree.items())
-    get_children = lambda n: key_tree.get(n.key, [])
-
-    if show_only:
-        nodes = [p for p in nodes
-                 if p.key in show_only or p.project_name in show_only]
-    elif not list_all:
-        nodes = [p for p in nodes if p.key not in branch_keys]
-
-    def aux(node, parent=None, indent=0, chain=None):
-        if exclude and (node.key in exclude or node.project_name in exclude):
-            return []
-        if chain is None:
-            chain = [node.project_name]
-        node_str = node.render(parent, frozen)
-        if parent:
-            prefix = ' '*indent + ('- ' if use_bullets else '')
-            node_str = prefix + node_str
-        result = [node_str]
-        children = [aux(c, node, indent=indent+2,
-                        chain=chain+[c.project_name])
-                    for c in get_children(node)
-                    if c.project_name not in chain]
-        result += list(flatten(children))
-        return result
-
-    lines = flatten([aux(p) for p in nodes])
-    return '\n'.join(lines)
-    
 
 def main():
     parser = argparse.ArgumentParser(description='')
@@ -508,84 +210,19 @@ def main():
 
     deps = []
 
-    build_deps({"name": "curl", "version": "", "version_test": ""}, deps, bindex)
+    packages = [
+        {"name": "curl", "version": "", "version_test": ""},
+        {"name": "bash", "version": "", "version_test": ""},
+        {"name": "terminator", "version": "", "version_test": ""}
+    ]
+
+    for pkg in packages:
+        build_deps(pkg, deps, bindex)
 
     print([x["Package"] for x in deps])
 
     return
 
-    #print(bindex)
-    #return
-    tree = construct_tree(bindex)
-
-    print(tree)
-
-    cyclic = cyclic_deps(tree)
-    cyclic_lookup = {}
-
-    for i in cyclic:
-        d = {
-            i[0].key: i[1].key
-        }
-        cyclic_lookup.update(d)
-    # for i,j in cyclic.items():
-    #     deps = ", ".join([x.key for x in j])
-    #     d = {
-    #         i.key: deps
-    #     }
-        
-
-    tree = sorted_tree(tree)
-    tree_lookup = {}
-
-    for i,j in tree.items():
-        deps = [x.key for x in j]
-        d = {
-            i.key: deps
-        }
-        tree_lookup.update(d)
-
-    with open(f"tree.json", 'w') as f:
-        json.dump(tree_lookup, f, indent=4)
-
-    with open(f"cyclic.json", 'w') as f:
-        json.dump(cyclic_lookup, f, indent=4)
-
-    deps = []
-
-    build_deps("curl", tree_lookup, cyclic_lookup, deps, root=True)
-
-    print(deps)
-    #print(json.dumps(di, indent=4))
-    #conflict = conflicting_deps(tree)
-    #print(conflict)
-    #print(cyclic)
-    # print("Print tree")
-    # print(tree)
-
-    #print(json.dumps(index[1], indent=4))
-
-
-
-
-def cyclic(package, deps, index, dep_stack=[]):
-    print(package)
-
-    find = next((x for x in index if x["key"] == package), None)
-
-    if find:
-        if find["key"] in dep_stack:
-            print("Cyclic")
-        else:
-            dep_stack.append(find["key"])
-            deps.append(find["key"])
-            for v in find["value"]:
-                cyclic(v, deps, dep_stack)
-
-    if len(dep_stack) > 0:
-        dep_stack.pop()
-
-    return
 
 class AptVerChk():
     lookup = {
@@ -604,6 +241,7 @@ class AptVerChk():
 
         return cls.lookup[sym](comp) if sym in cls.lookup.keys() else False
 
+
 def build_deps(package, deps, index, dep_stack=[]):
     # print(f"Root Dep {package['name']}: {dep_stack}")
     # print(dep_stack)
@@ -615,7 +253,7 @@ def build_deps(package, deps, index, dep_stack=[]):
             
             if len(package['version']) > 0:
                 if not AptVerChk.compare(pkg_inst['Version'], package['version_test'], package['version']):
-                    raise ValueError(f"Cant find version match for {package['name']}")
+                    raise ValueError(f"Cant find version match for {package['name']}, {pkg_inst['Version']} {package['version_test']} {package['version']}")
                 else:
                     found = True
 
@@ -645,37 +283,6 @@ def build_deps(package, deps, index, dep_stack=[]):
 
     if len(dep_stack) > 0:
         dep_stack.pop()
-
-    return
-
-
-def build_deps_old(package, tree, cyclic, final_deps, root=False):
-    if package in tree.keys():
-        deps = tree[package]
-
-        print(deps)
-
-        for dep in deps:
-            if root:
-                print(f"Root dep {dep}")
-            else:
-                print(dep)
-            if dep in cyclic.keys():
-                print("Cyclic")
-
-                if dep in final_deps:
-                    print("Cyclic parsed")
-                else:
-                    print(f"Appending package {cyclic[dep]}")
-                    final_deps.append(dep)
-                    build_deps(dep, tree, cyclic, final_deps)
-            else:
-                build_deps(dep, tree, cyclic, final_deps)
-
-        if not package in final_deps:
-            final_deps.append(package)
-    else:
-        raise ValueError(f"Package not found {package}")
 
     return
 
